@@ -1,9 +1,11 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <Update.h>
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Update.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
@@ -25,7 +27,7 @@ const char* password = "12345678";  // ← ЗАМЕНИТЕ НА ВАШ ПАРО
 
 // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-WebServer server(80);
+AsyncWebServer server(80);
 BLEScan* pBLEScan;
 bool inOtaMode = false;
 String devicesList = "";
@@ -34,7 +36,11 @@ const unsigned long scanInterval = 5000; // Сканирование кажды�
 
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
-      devicesList += advertisedDevice.getName() + " ";
+      // ИСПРАВЛЕНО: Конвертация std::string в Arduino String
+      String name = String(advertisedDevice.getName().c_str());
+      if (name.length() > 0 && name != "(null)") {
+        devicesList += name + " ";
+      }
       if (devicesList.length() > 200) {
         devicesList = devicesList.substring(0, 200) + "...";
       }
@@ -74,31 +80,36 @@ void startOTAServer() {
   display.setCursor(0,0);
   display.println("OTA MODE");
   display.println("--------");
-  display.println("IP: " + WiFi.localIP().toString());
-  display.println("http://<IP>/");
+  display.println("IP: ");
+  display.println(WiFi.localIP().toString());
   display.display();
 
-  server.on("/", HTTP_GET, []() {
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     String html = "<h2>ESP32 OTA Updater</h2>";
     html += "<p>Текущая прошивка: BLE Scanner</p>";
     html += "<form method='POST' enctype='multipart/form-data' action='/update'>";
     html += "<input type='file' name='firmware' accept='.bin' required>";
     html += "<input type='submit' value='Прошить'>";
     html += "</form>";
-    server.send(200, "text/html", html);
+    request->send(200, "text/html", html);
   });
 
-  server.on("/update", HTTP_POST, []() {
-    server.send(200, "text/plain", Update.hasError() ? "Ошибка" : "OK! Перезагрузка...");
-  }, []() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
+  server.on("/update", HTTP_POST, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", Update.hasError() ? "Ошибка" : "OK! Перезагрузка...");
+    ESP.restart();
+  }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
+    if(!index){
+      Serial.printf("UploadStart: %s\n", filename.c_str());
       Update.begin(UPDATE_SIZE_UNKNOWN);
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      Update.write(upload.buf, upload.currentSize);
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) {
-        ESP.restart();
+    }
+    if(len){
+      Update.write(data, len);
+    }
+    if(final){
+      if(Update.end(true)){
+        Serial.printf("UpdateSuccess: %uB\n", index+len);
+      } else {
+        Update.printError(Serial);
       }
     }
   });
@@ -106,6 +117,27 @@ void startOTAServer() {
   server.begin();
   inOtaMode = true;
   Serial.println("OTA сервер запущен");
+}
+
+void setupWiFi() {
+  Serial.print("Подключение к Wi-Fi");
+  WiFi.begin(ssid, password);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nУспешно! IP: " + WiFi.localIP().toString());
+  } else {
+    Serial.println("\nОшибка подключения к Wi-Fi");
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("Wi-Fi ERROR");
+    display.display();
+  }
 }
 
 void setup() {
@@ -141,25 +173,9 @@ void setup() {
     display.println("Нажата кнопка");
     display.display();
     
-    // Подключение к Wi-Fi для OTA
-    WiFi.begin(ssid, password);
-    Serial.print("Подключение к Wi-Fi");
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
-    }
-    
+    setupWiFi();
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nУспешно! IP: " + WiFi.localIP().toString());
       startOTAServer();
-    } else {
-      Serial.println("\nОшибка подключения к Wi-Fi");
-      display.clearDisplay();
-      display.setCursor(0,0);
-      display.println("Wi-Fi ERROR");
-      display.display();
     }
   } else {
     Serial.println("Кнопка OTA не нажата. Запуск BLE сканера...");
@@ -169,7 +185,7 @@ void setup() {
 
 void loop() {
   if (inOtaMode) {
-    server.handleClient();
+    // AsyncWebServer не требует вызова handleClient()
     return;
   }
   
@@ -189,8 +205,10 @@ void loop() {
       display.setTextSize(1);
       display.setCursor(0,0);
       display.println("BTN1: Сканирование");
-      display.display();
+      display.display(); // ИСПРАВЛЕНО: display() не возвращает значение
       devicesList = ""; // Очистка списка для нового сканирования
+      BLEScanResults foundDevices = pBLEScan->start(3, false); // 3 секунды сканирования
+      pBLEScan->clearResults();
     }
   }
   
@@ -203,26 +221,19 @@ void loop() {
       display.setTextSize(1);
       display.setCursor(0,0);
       display.println("BTN2: Устройства:");
-      display.println(devicesList);
-      display.display();
-    }
-  }
-  
-  // Периодическое сканирование BLE
-  if (millis() - lastScanTime > scanInterval) {
-    lastScanTime = millis();
-    Serial.println("Сканирование BLE устройств...");
-    devicesList = "";
-    BLEScanResults foundDevices = pBLEScan->start(3, false); // 3 секунды сканирования
-    pBLEScan->clearResults();
-    
-    if (display.display()) {
-      display.clearDisplay();
-      display.setTextSize(1);
-      display.setCursor(0,0);
-      display.println("BLE Устройства:");
-      display.println(devicesList.substring(0, 128)); // Ограничение для дисплея
-      display.display();
+      // Отображение списка устройств с переносом строк
+      int line = 12;
+      int pos = 0;
+      while (pos < devicesList.length() && line < 56) {
+        int nextSpace = devicesList.indexOf(' ', pos);
+        if (nextSpace == -1) nextSpace = devicesList.length();
+        String lineText = devicesList.substring(pos, nextSpace);
+        display.setCursor(0, line);
+        display.println(lineText);
+        pos = nextSpace + 1;
+        line += 12;
+      }
+      display.display(); // ИСПРАВЛЕНО: display() не возвращает значение
     }
   }
   
