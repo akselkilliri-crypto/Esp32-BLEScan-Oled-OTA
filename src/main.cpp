@@ -30,19 +30,24 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 AsyncWebServer server(80);
 BLEScan* pBLEScan;
 bool inOtaMode = false;
-String devicesList = "";
+char devicesList[256];  // Используем массив char вместо String для экономии памяти
 unsigned long lastScanTime = 0;
 const unsigned long scanInterval = 5000; // Сканирование каждые 5 секунд
+uint8_t deviceCount = 0;
 
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
-      // ИСПРАВЛЕНО: Конвертация std::string в Arduino String
-      String name = String(advertisedDevice.getName().c_str());
-      if (name.length() > 0 && name != "(null)") {
-        devicesList += name + " ";
-      }
-      if (devicesList.length() > 200) {
-        devicesList = devicesList.substring(0, 200) + "...";
+      if (deviceCount >= 10) return; // Ограничиваем количество устройств
+      
+      const char* name = advertisedDevice.getName().c_str();
+      if (strlen(name) > 0 && strcmp(name, "(null)") != 0) {
+        if (strlen(devicesList) > 0 && strlen(devicesList) + strlen(name) + 2 < 255) {
+          strcat(devicesList, "\n");
+          strcat(devicesList, name);
+        } else if (strlen(devicesList) == 0) {
+          strcpy(devicesList, name);
+        }
+        deviceCount++;
       }
     }
 };
@@ -57,14 +62,14 @@ void setupOLED() {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0,0);
-  display.println("BLE Scanner + OTA");
+  display.println("BLE Scanner");
   display.display();
 }
 
 void setupBLE() {
   Serial.println("Запуск BLE сканера...");
   
-  BLEDevice::init("ESP32 Scanner");
+  BLEDevice::init("Scanner");
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
@@ -79,36 +84,31 @@ void startOTAServer() {
   display.setTextSize(1);
   display.setCursor(0,0);
   display.println("OTA MODE");
-  display.println("--------");
   display.println("IP: ");
   display.println(WiFi.localIP().toString());
   display.display();
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    String html = "<h2>ESP32 OTA Updater</h2>";
-    html += "<p>Текущая прошивка: BLE Scanner</p>";
+    String html = "<h2>OTA Update</h2>";
     html += "<form method='POST' enctype='multipart/form-data' action='/update'>";
     html += "<input type='file' name='firmware' accept='.bin' required>";
-    html += "<input type='submit' value='Прошить'>";
+    html += "<input type='submit' value='Update'>";
     html += "</form>";
     request->send(200, "text/html", html);
   });
 
   server.on("/update", HTTP_POST, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", Update.hasError() ? "Ошибка" : "OK! Перезагрузка...");
+    request->send(200, "text/plain", Update.hasError() ? "Update failed" : "Update success! Rebooting...");
     ESP.restart();
   }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
     if(!index){
-      Serial.printf("UploadStart: %s\n", filename.c_str());
       Update.begin(UPDATE_SIZE_UNKNOWN);
     }
     if(len){
       Update.write(data, len);
     }
     if(final){
-      if(Update.end(true)){
-        Serial.printf("UpdateSuccess: %uB\n", index+len);
-      } else {
+      if(!Update.end(true)){
         Update.printError(Serial);
       }
     }
@@ -143,7 +143,7 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n\n=== ESP32 BLE Scanner + OTA ===");
+  Serial.println("\n\n=== ESP32 BLE Scanner ===");
   
   // Инициализация кнопок с внутренней подтяжкой
   pinMode(BUTTON_1_PIN, INPUT_PULLUP);
@@ -163,6 +163,7 @@ void setup() {
   }
 
   setupOLED();
+  memset(devicesList, 0, sizeof(devicesList)); // Очистка буфера
   
   if (otaButtonPressed) {
     Serial.println("Кнопка OTA нажата! Запуск OTA сервера...");
@@ -170,7 +171,7 @@ void setup() {
     display.setTextSize(1);
     display.setCursor(0,0);
     display.println("OTA MODE");
-    display.println("Нажата кнопка");
+    display.println("Hold BTN");
     display.display();
     
     setupWiFi();
@@ -185,7 +186,6 @@ void setup() {
 
 void loop() {
   if (inOtaMode) {
-    // AsyncWebServer не требует вызова handleClient()
     return;
   }
   
@@ -204,11 +204,17 @@ void loop() {
       display.clearDisplay();
       display.setTextSize(1);
       display.setCursor(0,0);
-      display.println("BTN1: Сканирование");
-      display.display(); // ИСПРАВЛЕНО: display() не возвращает значение
-      devicesList = ""; // Очистка списка для нового сканирования
-      BLEScanResults foundDevices = pBLEScan->start(3, false); // 3 секунды сканирования
+      display.println("Сканирование...");
+      display.display();
+      
+      // Очистка списка перед сканированием
+      memset(devicesList, 0, sizeof(devicesList));
+      deviceCount = 0;
+      
       pBLEScan->clearResults();
+      pBLEScan->start(3); // 3 секунды сканирования
+      delay(3100); // Даем время на сканирование
+      pBLEScan->stop();
     }
   }
   
@@ -220,22 +226,21 @@ void loop() {
       display.clearDisplay();
       display.setTextSize(1);
       display.setCursor(0,0);
-      display.println("BTN2: Устройства:");
-      // Отображение списка устройств с переносом строк
-      int line = 12;
-      int pos = 0;
-      while (pos < devicesList.length() && line < 56) {
-        int nextSpace = devicesList.indexOf(' ', pos);
-        if (nextSpace == -1) nextSpace = devicesList.length();
-        String lineText = devicesList.substring(pos, nextSpace);
+      display.println("Устройства:");
+      
+      // Отображение списка устройств
+      char* p = strtok(devicesList, "\n");
+      int line = 10;
+      while (p != NULL && line < 54) {
         display.setCursor(0, line);
-        display.println(lineText);
-        pos = nextSpace + 1;
-        line += 12;
+        display.println(p);
+        line += 10;
+        p = strtok(NULL, "\n");
       }
-      display.display(); // ИСПРАВЛЕНО: display() не возвращает значение
+      
+      display.display();
     }
   }
   
-  delay(10); // Короткая задержка для стабильности
+  delay(10);
 }
