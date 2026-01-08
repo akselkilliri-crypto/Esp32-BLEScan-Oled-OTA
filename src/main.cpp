@@ -174,6 +174,17 @@ void setupWiFi() {
 }
 
 void setup() {
+   // === КРИТИЧЕСКИ ВАЖНО: ОТКЛЮЧАЕМ PSRAM ДЛЯ ПЛАТ БЕЗ ПАМЯТИ ===
+  #ifdef CONFIG_SPIRAM_SUPPORT
+  #undef CONFIG_SPIRAM_SUPPORT
+  #endif
+  // ===========================================================
+  
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n\n=== ESP32 BLE Scanner ===");
+  
+  // ... остальной код без изменений ... 
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\n=== ESP32 BLE Scanner ===");
