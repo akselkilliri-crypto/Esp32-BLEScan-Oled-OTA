@@ -1,5 +1,3 @@
-name: Build ESP32 BLE Scanner + OTA
-
 on: [push, workflow_dispatch]
 
 jobs:
