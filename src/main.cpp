@@ -10,7 +10,7 @@
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
-#include "esp_ota_ops.h" // Критически важный заголовок для OTA
+#include "esp_ota_ops.h"
 
 // === НАСТРОЙКИ WI-FI (ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ!) ===
 const char* ssid = "MyWiFi";        // ← ЗАМЕНИТЕ НА ВАШУ СЕТЬ!
@@ -31,12 +31,12 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 AsyncWebServer server(80);
 BLEScan* pBLEScan;
 bool inOtaMode = false;
-char devicesList[256];  // Используем массив char вместо String для экономии памяти
+char devicesList[256];
 uint8_t deviceCount = 0;
 
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
-      if (deviceCount >= 10) return; // Ограничиваем количество устройств
+      if (deviceCount >= 10) return;
       
       const char* name = advertisedDevice.getName().c_str();
       if (strlen(name) > 0 && strcmp(name, "(null)") != 0) {
@@ -103,7 +103,6 @@ void startOTAServer() {
     if (!index) {
       Serial.printf("Обновление начато: %s\n", filename.c_str());
       
-      // Находим слот OTA_0
       update_partition = esp_ota_get_next_update_partition(NULL);
       if (update_partition == NULL) {
         Serial.println("Ошибка: слот OTA не найден!");
@@ -111,14 +110,12 @@ void startOTAServer() {
       }
       Serial.printf("Запись в слот: %s\n", update_partition->label);
       
-      // Начинаем обновление
       if (esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle) != ESP_OK) {
         Serial.println("Ошибка esp_ota_begin");
       }
     }
     
     if (len) {
-      // Пишем данные в слот
       esp_err_t err = esp_ota_write(update_handle, data, len);
       if (err != ESP_OK) {
         Serial.printf("Ошибка записи: %d\n", err);
@@ -128,13 +125,11 @@ void startOTAServer() {
     if (final) {
       Serial.println("Финализация обновления...");
       
-      // Завершаем обновление
       if (esp_ota_end(update_handle) != ESP_OK) {
         Serial.println("Ошибка esp_ota_end");
         return;
       }
       
-      // АКТИВИРУЕМ НОВЫЙ СЛОТ!
       if (esp_ota_set_boot_partition(update_partition) != ESP_OK) {
         Serial.println("Ошибка активации слота!");
         return;
@@ -147,7 +142,6 @@ void startOTAServer() {
       display.println("Rebooting...");
       display.display();
       
-      // Перезагрузка через 2 секунды
       delay(2000);
       ESP.restart();
     }
@@ -184,16 +178,14 @@ void setup() {
   delay(1000);
   Serial.println("\n\n=== ESP32 BLE Scanner ===");
   
-  // Инициализация кнопок с внутренней подтяжкой
   pinMode(BUTTON_1_PIN, INPUT_PULLUP);
   pinMode(BUTTON_2_PIN, INPUT_PULLUP);
   pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
   
-  // Проверка кнопки OTA при старте (удерживать при включении)
   Serial.println("Проверка кнопки BOOT (GPIO0)...");
   bool otaButtonPressed = false;
   
-  for (int i = 0; i < 30; i++) { // Увеличиваем до 30 итераций (3 секунды)
+  for (int i = 0; i < 30; i++) {
     if (digitalRead(OTA_BUTTON_PIN) == LOW) {
       otaButtonPressed = true;
       Serial.print("!");
@@ -203,7 +195,19 @@ void setup() {
   }
 
   setupOLED();
-  memset(devicesList, 0, sizeof(devicesList)); // Очистка буфера
+  memset(devicesList, 0, sizeof(devicesList));
+  
+  // === КРИТИЧЕСКИ ВАЖНЫЙ КОД: ПРИНУДИТЕЛЬНАЯ АКТИВАЦИЯ ===
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  esp_ota_img_states_t ota_state;
+  
+  if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+    if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_ota_mark_app_valid_cancel_rollback();
+      Serial.println("✅ Прошивка принудительно активирована!");
+    }
+  }
+  // ======================================================
   
   if (otaButtonPressed) {
     Serial.println("\nКнопка BOOT нажата! Запуск OTA сервера...");
@@ -229,17 +233,15 @@ void loop() {
     return;
   }
   
-  // Обработка кнопок
   static bool lastButton1State = HIGH;
   static bool lastButton2State = HIGH;
   
   bool button1State = digitalRead(BUTTON_1_PIN);
   bool button2State = digitalRead(BUTTON_2_PIN);
   
-  // Проверка нажатия кнопки 1
   if (lastButton1State != button1State) {
     lastButton1State = button1State;
-    if (button1State == LOW) { // Нажатие
+    if (button1State == LOW) {
       Serial.println("Кнопка 1 нажата");
       display.clearDisplay();
       display.setTextSize(1);
@@ -247,28 +249,25 @@ void loop() {
       display.println("Сканирование...");
       display.display();
       
-      // Очистка списка перед сканированием
       memset(devicesList, 0, sizeof(devicesList));
       deviceCount = 0;
       
       pBLEScan->clearResults();
-      pBLEScan->start(3); // 3 секунды сканирования
-      delay(3100); // Даем время на сканирование
+      pBLEScan->start(3);
+      delay(3100);
       pBLEScan->stop();
     }
   }
   
-  // Проверка нажатия кнопки 2
   if (lastButton2State != button2State) {
     lastButton2State = button2State;
-    if (button2State == LOW) { // Нажатие
+    if (button2State == LOW) {
       Serial.println("Кнопка 2 нажата");
       display.clearDisplay();
       display.setTextSize(1);
       display.setCursor(0,0);
       display.println("Устройства:");
       
-      // Отображение списка устройств
       char* p = strtok(devicesList, "\n");
       int line = 10;
       while (p != NULL && line < 54) {
