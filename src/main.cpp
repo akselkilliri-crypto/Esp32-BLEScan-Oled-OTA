@@ -10,6 +10,7 @@
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include "esp_ota_ops.h" // Критически важный заголовок для OTA
 
 // === НАСТРОЙКИ WI-FI (ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ!) ===
 const char* ssid = "MyWiFi";        // ← ЗАМЕНИТЕ НА ВАШУ СЕТЬ!
@@ -19,7 +20,7 @@ const char* password = "12345678";  // ← ЗАМЕНИТЕ НА ВАШ ПАРО
 // === ПИНЫ ===
 #define BUTTON_1_PIN 4   // Первая кнопка (внутренняя подтяжка)
 #define BUTTON_2_PIN 5   // Вторая кнопка (внутренняя подтяжка)
-#define OTA_BUTTON_PIN 0 // Третья кнопка для OTA (GPIO0 - Boot button)
+#define OTA_BUTTON_PIN 0 // Встроенная кнопка BOOT на GPIO0
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
@@ -31,8 +32,6 @@ AsyncWebServer server(80);
 BLEScan* pBLEScan;
 bool inOtaMode = false;
 char devicesList[256];  // Используем массив char вместо String для экономии памяти
-unsigned long lastScanTime = 0;
-const unsigned long scanInterval = 5000; // Сканирование каждые 5 секунд
 uint8_t deviceCount = 0;
 
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
@@ -84,8 +83,6 @@ void startOTAServer() {
   display.setTextSize(1);
   display.setCursor(0,0);
   display.println("OTA MODE");
-  display.println("IP: ");
-  display.println(WiFi.localIP().toString());
   display.display();
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -98,19 +95,61 @@ void startOTAServer() {
   });
 
   server.on("/update", HTTP_POST, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", Update.hasError() ? "Update failed" : "Update success! Rebooting...");
-    ESP.restart();
+    request->send(200, "text/plain", "Update started...");
   }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
-    if(!index){
-      Update.begin(UPDATE_SIZE_UNKNOWN);
-    }
-    if(len){
-      Update.write(data, len);
-    }
-    if(final){
-      if(!Update.end(true)){
-        Update.printError(Serial);
+    static esp_ota_handle_t update_handle = 0;
+    static const esp_partition_t *update_partition = NULL;
+    
+    if (!index) {
+      Serial.printf("Обновление начато: %s\n", filename.c_str());
+      
+      // Находим слот OTA_0
+      update_partition = esp_ota_get_next_update_partition(NULL);
+      if (update_partition == NULL) {
+        Serial.println("Ошибка: слот OTA не найден!");
+        return;
       }
+      Serial.printf("Запись в слот: %s\n", update_partition->label);
+      
+      // Начинаем обновление
+      if (esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle) != ESP_OK) {
+        Serial.println("Ошибка esp_ota_begin");
+      }
+    }
+    
+    if (len) {
+      // Пишем данные в слот
+      esp_err_t err = esp_ota_write(update_handle, data, len);
+      if (err != ESP_OK) {
+        Serial.printf("Ошибка записи: %d\n", err);
+      }
+    }
+    
+    if (final) {
+      Serial.println("Финализация обновления...");
+      
+      // Завершаем обновление
+      if (esp_ota_end(update_handle) != ESP_OK) {
+        Serial.println("Ошибка esp_ota_end");
+        return;
+      }
+      
+      // АКТИВИРУЕМ НОВЫЙ СЛОТ!
+      if (esp_ota_set_boot_partition(update_partition) != ESP_OK) {
+        Serial.println("Ошибка активации слота!");
+        return;
+      }
+      
+      Serial.println("✅ Обновление успешно! Перезагрузка...");
+      display.clearDisplay();
+      display.setCursor(0,0);
+      display.println("SUCCESS!");
+      display.println("Rebooting...");
+      display.display();
+      
+      // Перезагрузка через 2 секунды
+      delay(2000);
+      ESP.restart();
     }
   });
 
@@ -151,12 +190,13 @@ void setup() {
   pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
   
   // Проверка кнопки OTA при старте (удерживать при включении)
-  Serial.println("Проверка кнопки OTA...");
+  Serial.println("Проверка кнопки BOOT (GPIO0)...");
   bool otaButtonPressed = false;
   
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 30; i++) { // Увеличиваем до 30 итераций (3 секунды)
     if (digitalRead(OTA_BUTTON_PIN) == LOW) {
       otaButtonPressed = true;
+      Serial.print("!");
       break;
     }
     delay(100);
@@ -166,12 +206,12 @@ void setup() {
   memset(devicesList, 0, sizeof(devicesList)); // Очистка буфера
   
   if (otaButtonPressed) {
-    Serial.println("Кнопка OTA нажата! Запуск OTA сервера...");
+    Serial.println("\nКнопка BOOT нажата! Запуск OTA сервера...");
     display.clearDisplay();
     display.setTextSize(1);
     display.setCursor(0,0);
     display.println("OTA MODE");
-    display.println("Hold BTN");
+    display.println("Hold BOOT");
     display.display();
     
     setupWiFi();
@@ -179,7 +219,7 @@ void setup() {
       startOTAServer();
     }
   } else {
-    Serial.println("Кнопка OTA не нажата. Запуск BLE сканера...");
+    Serial.println("Кнопка BOOT не нажата. Запуск BLE сканера...");
     setupBLE();
   }
 }
